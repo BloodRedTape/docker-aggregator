@@ -16,7 +16,8 @@ RestartSec=5
 TimeoutStopSec=10
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
+# Keep /run/user visible for rootless Docker sockets.
+ProtectHome=read-only
 
 [Install]
 WantedBy=multi-user.target
