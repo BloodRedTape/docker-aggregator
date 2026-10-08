@@ -1,0 +1,22 @@
+[Unit]
+Description=Docker API aggregator
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/docker-aggregator --config /etc/docker-aggregator/config.toml
+ConfigurationDirectory=docker-aggregator
+ConfigurationDirectoryMode=0750
+ReadWritePaths=/etc/docker-aggregator
+RuntimeDirectory=docker-aggregator
+RuntimeDirectoryMode=0750
+UMask=0007
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
