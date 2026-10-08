@@ -58,8 +58,7 @@ func engineName(path string) string {
 	}
 	uid := filepath.Base(filepath.Dir(path))
 	if account, err := user.LookupId(uid); err == nil {
-		// UID suffix keeps names unique, even for unusual usernames.
-		return account.Username + "-" + uid
+		return account.Username
 	}
 	return "user-" + uid
 }

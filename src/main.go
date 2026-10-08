@@ -65,6 +65,6 @@ func run() error {
 	if enabled == 0 {
 		log.Printf("warning: no enabled Docker engines; edit %s", *configPath)
 	}
-	log.Printf("configured engines: %d enabled, %d total (aggregation not implemented yet)", enabled, len(cfg.Engines))
-	return server.Run(ctx, cfg.Server.Socket, api.NewHandler())
+	log.Printf("configured engines: %d enabled, %d total", enabled, len(cfg.Engines))
+	return server.Run(ctx, cfg.Server.Socket, api.NewHandler(cfg.Engines))
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/pelletier/go-toml/v2"
 )
@@ -83,10 +84,16 @@ func (cfg Config) Validate() error {
 	if !filepath.IsAbs(cfg.Server.Socket) {
 		return errors.New("server.socket must be an absolute path")
 	}
-	names, paths := map[string]bool{}, map[string]bool{}
+	names, paths := map[string]string{}, map[string]bool{}
 	for _, engine := range cfg.Engines {
-		if engine.Name == "" || names[engine.Name] {
-			return fmt.Errorf("engine name must be non-empty and unique: %q", engine.Name)
+		if strings.TrimSpace(engine.Name) == "" {
+			return fmt.Errorf("engine at %q: name must not be empty", engine.Socket)
+		}
+		if strings.Contains(engine.Name, "/") {
+			return fmt.Errorf("engine %q: name must not contain '/'", engine.Name)
+		}
+		if previous, exists := names[engine.Name]; exists {
+			return fmt.Errorf("duplicate engine name %q for %q and %q: assign unique names in the config (create it manually if absent)", engine.Name, previous, engine.Socket)
 		}
 		if !filepath.IsAbs(engine.Socket) {
 			return fmt.Errorf("engine %q: socket must be an absolute path", engine.Name)
@@ -95,7 +102,7 @@ func (cfg Config) Validate() error {
 		if paths[path] || path == filepath.Clean(cfg.Server.Socket) {
 			return fmt.Errorf("engine %q: duplicate socket or server socket used as upstream", engine.Name)
 		}
-		names[engine.Name], paths[path] = true, true
+		names[engine.Name], paths[path] = engine.Socket, true
 	}
 	return nil
 }
