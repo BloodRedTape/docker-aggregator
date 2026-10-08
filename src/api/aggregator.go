@@ -27,9 +27,13 @@ func (e upstreamError) Error() string { return fmt.Sprintf("Docker returned HTTP
 type engine struct {
 	name      string
 	socket    string
-	disabled  atomic.Bool
+	disabled  uint32 // Access only through sync/atomic.
 	client    *http.Client
 	transport *http.Transport
+}
+
+func (e *engine) isDisabled() bool {
+	return atomic.LoadUint32(&e.disabled) != 0
 }
 
 type route struct {
@@ -110,7 +114,7 @@ func (a *aggregator) fail(ctx context.Context, e *engine, err error) {
 	if errors.As(err, &upstream) && upstream.status >= 400 && upstream.status < 500 && upstream.status != 401 && upstream.status != 403 {
 		return
 	}
-	if !e.disabled.CompareAndSwap(false, true) {
+	if !atomic.CompareAndSwapUint32(&e.disabled, 0, 1) {
 		return
 	}
 	e.transport.CloseIdleConnections()
@@ -127,7 +131,7 @@ func (a *aggregator) collect(ctx context.Context, prefix, query string) ([]map[s
 	containers := make([]map[string]json.RawMessage, 0)
 	failed := make([]string, 0)
 	for _, e := range a.engines {
-		if e.disabled.Load() {
+		if e.isDisabled() {
 			failed = append(failed, e.name)
 			continue
 		}
@@ -227,7 +231,7 @@ func (a *aggregator) container(w http.ResponseWriter, r *http.Request, prefix, k
 		writeJSON(w, status, map[string]string{"message": "container not found, ambiguous, or engine unavailable"})
 		return
 	}
-	if rt.engine.disabled.Load() {
+	if rt.engine.isDisabled() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "engine is disabled; enable it in config and restart"})
 		return
 	}

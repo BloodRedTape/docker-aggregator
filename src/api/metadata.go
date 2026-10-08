@@ -26,7 +26,7 @@ type metadataResult struct {
 func (a *aggregator) metadata(w http.ResponseWriter, r *http.Request, prefix, endpoint string) {
 	var engines []*engine
 	for _, e := range a.engines {
-		if !e.disabled.Load() {
+		if !e.isDisabled() {
 			engines = append(engines, e)
 		}
 	}
@@ -89,7 +89,7 @@ func (a *aggregator) metadata(w http.ResponseWriter, r *http.Request, prefix, en
 		return
 	}
 	for _, e := range engines {
-		if e.disabled.Load() {
+		if e.isDisabled() {
 			failed = true
 		}
 	}
