@@ -66,5 +66,5 @@ func run() error {
 		log.Printf("warning: no enabled Docker engines; edit %s", *configPath)
 	}
 	log.Printf("configured engines: %d enabled, %d total", enabled, len(cfg.Engines))
-	return server.Run(ctx, cfg.Server.Socket, api.NewHandler(cfg.Engines))
+	return server.Run(ctx, cfg.Server.Socket, api.NewHandler(cfg.Engines, config.Disabler(*configPath)))
 }

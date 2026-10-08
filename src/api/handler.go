@@ -12,8 +12,8 @@ import (
 
 var versionPrefix = regexp.MustCompile(`^/v[0-9]+\.[0-9]+`)
 
-func NewHandler(engines []config.Engine) http.Handler {
-	a := newAggregator(engines)
+func NewHandler(engines []config.Engine, disable func(string, string, error) error) http.Handler {
+	a := newAggregator(engines, disable)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.Header().Set("Allow", "GET, HEAD")

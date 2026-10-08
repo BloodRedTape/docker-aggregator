@@ -36,7 +36,7 @@ func Encode(cfg Config) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]byte("# Generated on first start. Edit freely; existing configs are never overwritten.\n"), body...), nil
+	return append([]byte("# Generated on first start. Engine failures persist enabled=false and a diagnostic note.\n"), body...), nil
 }
 
 // LoadOrCreate only discovers engines when the config does not exist.

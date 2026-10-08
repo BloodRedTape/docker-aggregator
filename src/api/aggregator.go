@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"docker-aggregator/src/config"
@@ -25,6 +26,8 @@ func (e upstreamError) Error() string { return fmt.Sprintf("Docker returned HTTP
 
 type engine struct {
 	name      string
+	socket    string
+	disabled  atomic.Bool
 	client    *http.Client
 	transport *http.Transport
 }
@@ -37,12 +40,13 @@ type route struct {
 
 type aggregator struct {
 	engines []*engine
+	disable func(string, string, error) error
 	mu      sync.RWMutex
 	routes  map[string]route
 }
 
-func newAggregator(configs []config.Engine) *aggregator {
-	a := &aggregator{routes: make(map[string]route)}
+func newAggregator(configs []config.Engine, disable func(string, string, error) error) *aggregator {
+	a := &aggregator{routes: make(map[string]route), disable: disable}
 	for _, cfg := range configs {
 		if !cfg.Enabled {
 			continue
@@ -55,7 +59,7 @@ func newAggregator(configs []config.Engine) *aggregator {
 			ResponseHeaderTimeout: 10 * time.Second,
 			IdleConnTimeout:       60 * time.Second,
 		}
-		a.engines = append(a.engines, &engine{name: cfg.Name, transport: transport, client: &http.Client{
+		a.engines = append(a.engines, &engine{name: cfg.Name, socket: cfg.Socket, transport: transport, client: &http.Client{
 			Transport:     transport,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
 		}})
@@ -97,14 +101,40 @@ func setField(object map[string]json.RawMessage, key string, value any) {
 	object[key], _ = json.Marshal(value)
 }
 
-// collect keeps known routes when a daemon is temporarily unavailable.
+// fail disables an engine once, but never because a downstream client left.
+func (a *aggregator) fail(ctx context.Context, e *engine, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	var upstream upstreamError
+	if errors.As(err, &upstream) && upstream.status >= 400 && upstream.status < 500 && upstream.status != 401 && upstream.status != 403 {
+		return
+	}
+	if !e.disabled.CompareAndSwap(false, true) {
+		return
+	}
+	e.transport.CloseIdleConnections()
+	log.Printf("engine %s (%s) disabled: %v", e.name, e.socket, err)
+	if a.disable != nil {
+		if saveErr := a.disable(e.name, e.socket, err); saveErr != nil {
+			log.Printf("engine %s: FAILED to persist disable: %v; disabled in memory only", e.name, saveErr)
+		}
+	}
+}
+
+// collect skips disabled engines; known routes are retained to return 503.
 func (a *aggregator) collect(ctx context.Context, prefix, query string) ([]map[string]json.RawMessage, []string) {
 	containers := make([]map[string]json.RawMessage, 0)
 	failed := make([]string, 0)
 	for _, e := range a.engines {
+		if e.disabled.Load() {
+			failed = append(failed, e.name)
+			continue
+		}
 		var items []map[string]json.RawMessage
 		if err := e.get(ctx, prefix+"/containers/json", query, &items); err != nil {
 			log.Printf("engine %s: list: %v", e.name, err)
+			a.fail(ctx, e, err)
 			failed = append(failed, e.name)
 			continue
 		}
@@ -197,10 +227,15 @@ func (a *aggregator) container(w http.ResponseWriter, r *http.Request, prefix, k
 		writeJSON(w, status, map[string]string{"message": "container not found, ambiguous, or engine unavailable"})
 		return
 	}
+	if rt.engine.disabled.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "engine is disabled; enable it in config and restart"})
+		return
+	}
 	path := prefix + "/containers/" + url.PathEscape(rt.original) + "/" + operation
 	if operation == "json" {
 		var object map[string]json.RawMessage
 		if err := rt.engine.get(r.Context(), path, r.URL.RawQuery, &object); err != nil {
+			a.fail(r.Context(), rt.engine, err)
 			status := http.StatusBadGateway
 			var upstream upstreamError
 			if errors.As(err, &upstream) {
@@ -222,11 +257,13 @@ func (a *aggregator) container(w http.ResponseWriter, r *http.Request, prefix, k
 	req.URL.RawQuery = r.URL.RawQuery
 	resp, err := rt.engine.client.Do(req)
 	if err != nil {
+		a.fail(r.Context(), rt.engine, err)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"message": "upstream stats failed"})
 		return
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		a.fail(r.Context(), rt.engine, upstreamError{status: resp.StatusCode})
 		writeJSON(w, resp.StatusCode, map[string]string{"message": "upstream stats failed"})
 		return
 	}
@@ -238,7 +275,7 @@ func (a *aggregator) container(w http.ResponseWriter, r *http.Request, prefix, k
 		var frame map[string]json.RawMessage
 		if err := decoder.Decode(&frame); err != nil {
 			if err != io.EOF && r.Context().Err() == nil {
-				log.Printf("engine %s: stats decode: %v", rt.engine.name, err)
+				a.fail(r.Context(), rt.engine, err)
 				if !started {
 					writeJSON(w, http.StatusBadGateway, map[string]string{"message": "invalid upstream stats"})
 				}
