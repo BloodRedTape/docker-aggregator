@@ -1,5 +1,5 @@
 module docker-aggregator
 
-go 1.22
+go 1.19
 
-require github.com/pelletier/go-toml/v2 v2.2.3
+require github.com/pelletier/go-toml/v2 v2.1.1
