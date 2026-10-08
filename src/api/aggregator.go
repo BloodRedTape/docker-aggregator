@@ -232,6 +232,10 @@ func (a *aggregator) container(w http.ResponseWriter, r *http.Request, prefix, k
 		return
 	}
 	path := prefix + "/containers/" + url.PathEscape(rt.original) + "/" + operation
+	if operation == "logs" {
+		a.logs(w, r, rt, path)
+		return
+	}
 	if operation == "json" {
 		var object map[string]json.RawMessage
 		if err := rt.engine.get(r.Context(), path, r.URL.RawQuery, &object); err != nil {

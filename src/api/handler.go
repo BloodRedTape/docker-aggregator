@@ -34,8 +34,8 @@ func NewHandler(engines []config.Engine, disable func(string, string, error) err
 			_, _ = w.Write([]byte("OK"))
 		case "/healthz":
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-		case "/version":
-			writeJSON(w, http.StatusNotImplemented, map[string]string{"message": "API version negotiation is not implemented yet"})
+		case "/version", "/info":
+			a.metadata(w, r, prefix, path)
 		case "/containers/json":
 			a.list(w, r, prefix)
 		default:
@@ -43,7 +43,7 @@ func NewHandler(engines []config.Engine, disable func(string, string, error) err
 				rest := strings.TrimPrefix(path, "/containers/")
 				if index := strings.LastIndex(rest, "/"); index > 0 {
 					key, operation := rest[:index], rest[index+1:]
-					if operation == "json" || operation == "stats" {
+					if operation == "json" || operation == "stats" || operation == "logs" {
 						a.container(w, r, prefix, key, operation)
 						return
 					}
