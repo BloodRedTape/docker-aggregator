@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
+Group=docker
 ExecStart=/usr/local/bin/docker-aggregator --config /etc/docker-aggregator/config.toml
 ConfigurationDirectory=docker-aggregator
 ConfigurationDirectoryMode=0750

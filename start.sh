@@ -8,7 +8,7 @@ if [[ $(uname -s) != Linux ]]; then
     echo 'This script requires Linux with systemd.' >&2
     exit 1
 fi
-for command in go systemctl install cmp mktemp; do
+for command in go systemctl install cmp mktemp getent; do
     if ! command -v "$command" >/dev/null 2>&1; then
         echo "Required command not found: $command" >&2
         exit 1
@@ -27,6 +27,16 @@ if (( EUID != 0 )); then
     fi
     sudo_cmd=(sudo)
     sudo -v
+fi
+
+# Rootless-only hosts may not have the group used by the service's socket.
+# Do not add users automatically: membership grants access to Docker APIs.
+if ! getent group docker >/dev/null; then
+    if ! command -v groupadd >/dev/null 2>&1; then
+        echo 'Group docker is missing; install groupadd or create the group manually.' >&2
+        exit 1
+    fi
+    "${sudo_cmd[@]}" groupadd --system docker
 fi
 
 service=docker-aggregator.service
@@ -92,3 +102,5 @@ done
 
 echo "Service is enabled and running (PID $pid)."
 echo "Logs: sudo journalctl -u $service -f"
+echo 'Socket access requires membership in group docker (for example: sudo usermod -aG docker beszel).'
+echo 'Restart the agent after changing group membership; do not make the socket world-accessible.'
