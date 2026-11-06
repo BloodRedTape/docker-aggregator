@@ -31,6 +31,11 @@ func NewHandler(engines []config.Engine, disable func(string, string, error) err
 		switch path {
 		case "/_ping":
 			w.Header().Set("Content-Type", "text/plain")
+			if !a.available(r.Context()) {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte("no Docker engines available"))
+				return
+			}
 			_, _ = w.Write([]byte("OK"))
 		case "/healthz":
 			writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})

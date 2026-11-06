@@ -34,15 +34,12 @@ func Discover(ctx context.Context) (Config, error) {
 			log.Printf("discovery: ignoring non-socket %s", path)
 			continue
 		}
-		engine := Engine{Name: engineName(path), Socket: path}
+		engine := Engine{Name: engineName(path), Socket: path, Enabled: true}
 		if err == nil {
 			err = ping(ctx, path)
 		}
 		if err != nil {
-			engine.Note = "Discovery failed: " + err.Error()
-			log.Printf("discovery: disabled %s: %v", path, err)
-		} else {
-			engine.Enabled = true
+			log.Printf("discovery: %s not responding, added anyway: %v", path, err)
 		}
 		cfg.Engines = append(cfg.Engines, engine)
 	}

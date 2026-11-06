@@ -24,16 +24,33 @@ type upstreamError struct{ status int }
 
 func (e upstreamError) Error() string { return fmt.Sprintf("Docker returned HTTP %d", e.status) }
 
+const retryDelay = 5 * time.Second
+
 type engine struct {
+	downUntil int64 // Unix nanoseconds, 0 when healthy. First field for 64-bit atomic alignment.
+	disabled  uint32
 	name      string
 	socket    string
-	disabled  uint32 // Access only through sync/atomic.
 	client    *http.Client
 	transport *http.Transport
 }
 
 func (e *engine) isDisabled() bool {
 	return atomic.LoadUint32(&e.disabled) != 0
+}
+
+func (e *engine) unavailable() bool {
+	return e.isDisabled() || time.Now().UnixNano() < atomic.LoadInt64(&e.downUntil)
+}
+
+func (e *engine) healthy() bool {
+	return !e.isDisabled() && atomic.LoadInt64(&e.downUntil) == 0
+}
+
+func (e *engine) markUp() {
+	if atomic.LoadInt64(&e.downUntil) != 0 && atomic.SwapInt64(&e.downUntil, 0) != 0 {
+		log.Printf("engine %s (%s) is available again", e.name, e.socket)
+	}
 }
 
 type route struct {
@@ -92,7 +109,59 @@ func (e *engine) get(ctx context.Context, path, query string, target any) error 
 	if resp.StatusCode != http.StatusOK {
 		return upstreamError{status: resp.StatusCode}
 	}
-	return json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(target)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 32<<20)).Decode(target); err != nil {
+		return err
+	}
+	e.markUp()
+	return nil
+}
+
+func (e *engine) ping(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/_ping", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := e.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return upstreamError{status: resp.StatusCode}
+	}
+	e.markUp()
+	return nil
+}
+
+// available reports whether any engine can serve requests, probing engines
+// whose retry delay has expired when none is known to be healthy.
+func (a *aggregator) available(ctx context.Context) bool {
+	var candidates []*engine
+	for _, e := range a.engines {
+		if e.healthy() {
+			return true
+		}
+		if !e.unavailable() {
+			candidates = append(candidates, e)
+		}
+	}
+	results := make(chan bool, len(candidates))
+	for _, e := range candidates {
+		go func(e *engine) {
+			err := e.ping(ctx)
+			if err != nil {
+				a.fail(ctx, e, err)
+			}
+			results <- err == nil
+		}(e)
+	}
+	ok := false
+	for range candidates {
+		ok = <-results || ok
+	}
+	return ok
 }
 
 func stringField(object map[string]json.RawMessage, key string) string {
@@ -105,7 +174,7 @@ func setField(object map[string]json.RawMessage, key string, value any) {
 	object[key], _ = json.Marshal(value)
 }
 
-// fail disables an engine once, but never because a downstream client left.
+// fail skips an engine for retryDelay, but never because a downstream client left.
 func (a *aggregator) fail(ctx context.Context, e *engine, err error) {
 	if ctx.Err() != nil {
 		return
@@ -114,6 +183,14 @@ func (a *aggregator) fail(ctx context.Context, e *engine, err error) {
 	if errors.As(err, &upstream) && upstream.status >= 400 && upstream.status < 500 && upstream.status != 401 && upstream.status != 403 {
 		return
 	}
+	e.transport.CloseIdleConnections()
+	if atomic.SwapInt64(&e.downUntil, time.Now().Add(retryDelay).UnixNano()) == 0 {
+		log.Printf("engine %s (%s) unavailable, retrying every %s: %v", e.name, e.socket, retryDelay, err)
+	}
+}
+
+// disableEngine persists enabled=false; used only for metadata mismatches.
+func (a *aggregator) disableEngine(e *engine, err error) {
 	if !atomic.CompareAndSwapUint32(&e.disabled, 0, 1) {
 		return
 	}
@@ -126,18 +203,17 @@ func (a *aggregator) fail(ctx context.Context, e *engine, err error) {
 	}
 }
 
-// collect skips disabled engines; known routes are retained to return 503.
+// collect skips unavailable engines; known routes are retained to return 503.
 func (a *aggregator) collect(ctx context.Context, prefix, query string) ([]map[string]json.RawMessage, []string) {
 	containers := make([]map[string]json.RawMessage, 0)
 	failed := make([]string, 0)
 	for _, e := range a.engines {
-		if e.isDisabled() {
+		if e.unavailable() {
 			failed = append(failed, e.name)
 			continue
 		}
 		var items []map[string]json.RawMessage
 		if err := e.get(ctx, prefix+"/containers/json", query, &items); err != nil {
-			log.Printf("engine %s: list: %v", e.name, err)
 			a.fail(ctx, e, err)
 			failed = append(failed, e.name)
 			continue
@@ -231,8 +307,8 @@ func (a *aggregator) container(w http.ResponseWriter, r *http.Request, prefix, k
 		writeJSON(w, status, map[string]string{"message": "container not found, ambiguous, or engine unavailable"})
 		return
 	}
-	if rt.engine.isDisabled() {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "engine is disabled; enable it in config and restart"})
+	if rt.engine.unavailable() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "engine is unavailable or disabled"})
 		return
 	}
 	path := prefix + "/containers/" + url.PathEscape(rt.original) + "/" + operation
@@ -275,6 +351,7 @@ func (a *aggregator) container(w http.ResponseWriter, r *http.Request, prefix, k
 		writeJSON(w, resp.StatusCode, map[string]string{"message": "upstream stats failed"})
 		return
 	}
+	rt.engine.markUp()
 	w.Header().Set("Content-Type", "application/json")
 	decoder := json.NewDecoder(resp.Body)
 	encoder := json.NewEncoder(w)

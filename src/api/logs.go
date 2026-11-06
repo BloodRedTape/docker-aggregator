@@ -23,6 +23,8 @@ func (a *aggregator) logs(w http.ResponseWriter, r *http.Request, rt route, path
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		a.fail(r.Context(), rt.engine, upstreamError{status: resp.StatusCode})
+	} else {
+		rt.engine.markUp()
 	}
 	for _, key := range []string{"Content-Type", "Content-Length"} {
 		if value := resp.Header.Get(key); value != "" {

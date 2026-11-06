@@ -26,12 +26,12 @@ type metadataResult struct {
 func (a *aggregator) metadata(w http.ResponseWriter, r *http.Request, prefix, endpoint string) {
 	var engines []*engine
 	for _, e := range a.engines {
-		if !e.isDisabled() {
+		if !e.unavailable() {
 			engines = append(engines, e)
 		}
 	}
 	if len(engines) == 0 {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "no enabled Docker engines"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "no Docker engines available"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 1500*time.Millisecond)
@@ -49,30 +49,26 @@ func (a *aggregator) metadata(w http.ResponseWriter, r *http.Request, prefix, en
 		}(e)
 	}
 	responses := make([]metadataResult, 0, len(engines))
-	failed := false
 	for range engines {
 		result := <-results
-		responses = append(responses, result)
 		if result.err != nil {
-			failed = true
-			log.Printf("engine %s: %s: %v", result.engine.name, endpoint, result.err)
 			// Use the downstream context: our own deadline is an engine failure,
-			// whereas a disconnected client must not disable engines.
+			// whereas a disconnected client must not mark engines unavailable.
 			a.fail(r.Context(), result.engine, result.err)
+			continue
 		}
+		responses = append(responses, result)
 	}
 	if r.Context().Err() != nil {
 		return
 	}
-	var reference []byte
+	if len(responses) == 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "no Docker engines available"})
+		return
+	}
+	reference := responses[0].body
 	mismatch := false
-	for _, result := range responses {
-		if result.err != nil {
-			continue
-		}
-		if reference == nil {
-			reference = result.body
-		}
+	for _, result := range responses[1:] {
 		if !bytes.Equal(reference, result.body) {
 			mismatch = true
 		}
@@ -80,21 +76,10 @@ func (a *aggregator) metadata(w http.ResponseWriter, r *http.Request, prefix, en
 	if mismatch {
 		err := fmt.Errorf("%s metadata mismatch across enabled engines", endpoint)
 		for _, result := range responses {
-			if result.err == nil {
-				log.Printf("engine %s: %s compared response: %s", result.engine.name, endpoint, result.body)
-			}
-			a.fail(r.Context(), result.engine, err)
+			log.Printf("engine %s: %s compared response: %s", result.engine.name, endpoint, result.body)
+			a.disableEngine(result.engine, err)
 		}
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": err.Error()})
-		return
-	}
-	for _, e := range engines {
-		if e.isDisabled() {
-			failed = true
-		}
-	}
-	if failed {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"message": "metadata verification failed; no verified response available"})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
