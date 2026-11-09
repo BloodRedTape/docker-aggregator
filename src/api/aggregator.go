@@ -24,10 +24,15 @@ type upstreamError struct{ status int }
 
 func (e upstreamError) Error() string { return fmt.Sprintf("Docker returned HTTP %d", e.status) }
 
-const retryDelay = 5 * time.Second
+const (
+	retryDelay      = 5 * time.Second
+	failLogInterval = time.Minute
+	slowRequest     = time.Second
+)
 
 type engine struct {
-	downUntil int64 // Unix nanoseconds, 0 when healthy. First field for 64-bit atomic alignment.
+	downUntil int64 // Unix nanoseconds, 0 when healthy. First fields for 64-bit atomic alignment.
+	lastLog   int64
 	disabled  uint32
 	name      string
 	socket    string
@@ -181,11 +186,19 @@ func (a *aggregator) fail(ctx context.Context, e *engine, err error) {
 	}
 	var upstream upstreamError
 	if errors.As(err, &upstream) && upstream.status >= 400 && upstream.status < 500 && upstream.status != 401 && upstream.status != 403 {
+		log.Printf("engine %s: %v", e.name, err)
 		return
 	}
 	e.transport.CloseIdleConnections()
-	if atomic.SwapInt64(&e.downUntil, time.Now().Add(retryDelay).UnixNano()) == 0 {
+	now := time.Now().UnixNano()
+	if atomic.SwapInt64(&e.downUntil, now+int64(retryDelay)) == 0 {
+		atomic.StoreInt64(&e.lastLog, now)
 		log.Printf("engine %s (%s) unavailable, retrying every %s: %v", e.name, e.socket, retryDelay, err)
+		return
+	}
+	last := atomic.LoadInt64(&e.lastLog)
+	if now-last >= int64(failLogInterval) && atomic.CompareAndSwapInt64(&e.lastLog, last, now) {
+		log.Printf("engine %s (%s) still unavailable: %v", e.name, e.socket, err)
 	}
 }
 
@@ -205,19 +218,50 @@ func (a *aggregator) disableEngine(e *engine, err error) {
 
 // collect skips unavailable engines; known routes are retained to return 503.
 func (a *aggregator) collect(ctx context.Context, prefix, query string) ([]map[string]json.RawMessage, []string) {
+	type listResult struct {
+		skipped bool
+		items   []map[string]json.RawMessage
+		err     error
+		took    time.Duration
+	}
+	results := make([]listResult, len(a.engines))
+	var wg sync.WaitGroup
+	for i, e := range a.engines {
+		if e.unavailable() {
+			results[i].skipped = true
+			continue
+		}
+		wg.Add(1)
+		go func(i int, e *engine) {
+			defer wg.Done()
+			start := time.Now()
+			var items []map[string]json.RawMessage
+			err := e.get(ctx, prefix+"/containers/json", query, &items)
+			results[i] = listResult{items: items, err: err, took: time.Since(start)}
+		}(i, e)
+	}
+	wg.Wait()
+
 	containers := make([]map[string]json.RawMessage, 0)
 	failed := make([]string, 0)
-	for _, e := range a.engines {
-		if e.unavailable() {
+	for i, e := range a.engines {
+		result := results[i]
+		if result.skipped {
 			failed = append(failed, e.name)
 			continue
 		}
-		var items []map[string]json.RawMessage
-		if err := e.get(ctx, prefix+"/containers/json", query, &items); err != nil {
-			a.fail(ctx, e, err)
+		if result.err != nil {
+			if ctx.Err() != nil {
+				log.Printf("engine %s: list canceled by client after %s", e.name, result.took.Round(time.Millisecond))
+			}
+			a.fail(ctx, e, result.err)
 			failed = append(failed, e.name)
 			continue
 		}
+		if result.took >= slowRequest {
+			log.Printf("engine %s: list took %s", e.name, result.took.Round(time.Millisecond))
+		}
+		items := result.items
 		// A complete refresh replaces routes only for this available engine.
 		if query == "all=1" {
 			a.mu.Lock()
